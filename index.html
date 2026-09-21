@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Прототип 3</title>
+<style>
+  :root{color-scheme:dark}
+  body{font-family:system-ui,sans-serif;background:#14161a;color:#e8e8e8;margin:0;padding:14px}
+  h1{font-size:20px;margin:6px 0}
+  .card{background:#1e2126;border:1px solid #333;border-radius:12px;padding:12px;margin-top:10px}
+  textarea{width:100%;min-height:110px;background:#15181c;color:#e8e8e8;border:1px solid #3a3f46;border-radius:8px;padding:8px;font-size:16px}
+  button{font-size:16px;padding:10px 14px;margin:4px 4px 4px 0;border-radius:8px;border:1px solid #3a3f46;background:#2a2f36;color:#e8e8e8}
+  button.on{background:#3b6ea5;border-color:#5a8fc0}
+  label{font-size:14px;margin-right:10px}
+  #status{color:#9aa4af;font-size:13px;margin-top:8px}
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<div>
+  <button data-l="ru">RU</button><button data-l="en">EN</button><button data-l="jp">JP</button>
+</div>
+<div class="card">
+  <div>
+    <button id="mEnc" class="on"></button><button id="mDec"></button>
+  </div>
+  <textarea id="in"></textarea>
+  <p>
+    <label id="lblDate"></label><input type="date" id="date">
+    <label><input type="checkbox" id="usePwd"><span id="lblPwd"></span></label>
+    <input type="text" id="pwd" placeholder="•••" size="12">
+  </p>
+  <button id="go"></button>
+  <textarea id="out" readonly></textarea>
+  <button id="copy"></button>
+  <div id="status"></div>
+</div>
+
+<script>
+"use strict";
+// ---------- КОЛЬЦА (точно как в Java-версии) ----------
+const RU="АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ";
+const EN="ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const DIG="0123456789";
+const PUNCT=".,!?;:-()\"'№#%&*@+/=<>_~^$";
+const JP_PUNCT="、。，．！？〈〉「」『』【】〜";
+const MARKER="ヿ";
+const rng=(a,b)=>{let s="";for(let c=a;c<=b;c++)s+=String.fromCharCode(c);return s;};
+const HIRA=rng(0x3041,0x3096), KATA=rng(0x30A1,0x30FA), KANJI=rng(0x4E00,0x9FFF);
+const RINGS=[RU,EN,HIRA,KATA,KANJI];
+const ringFor=ch=>{const u=ch.toUpperCase();for(const r of RINGS){if(r.includes(u))return r;}return null;};
+const isLetter=ch=>ringFor(ch)!==null;
+function scriptOf(w){for(const ch of w){const r=ringFor(ch);if(r===RU)return 0;if(r===EN)return 1;if(r)return 2;}return -1;}
+
+// ---------- СЛОВАРИ ----------
+// Полные словари лежат рядом с index.html под этими именами.
+const DICT_FILES={0:"russian-utf8.txt",1:"english-utf8.txt",2:"japanese-utf8.txt"};
+// Демо-словарь: сайт работает сразу, даже пока файлов нет рядом.
+const FALLBACK={
+0:"он мы вы ты да уж ли бы ни до по ну её их кот дом лес мир сон сок зуб нос рот шар сыр чай час щит мак рак ток бок ёж мяч рука нога вода зима лето рыба каша душа село море поле небо хлеб соль стул стол мост окно гриб снег утка лапа луна река гора книга птица трава земля город кошка мышка ложка дверь песня карта марка ручка шапка ветер огонь сахар дерево голова письмо дорога улица собака берёза корова лопата картина погода работа молоко облако машина природа".split(" "),
+1:"I we you he she it is am are to of in on at by or and not no yes cat dog house tree book door window table chair water fire earth sky bread salt milk snow rain sun moon star river hill city street letter word song wind sugar apple house horse".split(" ")
+};
+const buckets=new Map(), index=new Map();
+const bkey=(sc,len)=>sc*10000+len;
+function addWord(w,sc){
+  w=w.trim().toLowerCase();
+  if(!w)return;
+  for(const ch of w){if(!isLetter(ch))return;}
+  if(scriptOf(w)!==sc)return;
+  const k=bkey(sc,w.length);
+  let m=index.get(k); if(!m){m=new Map();index.set(k,m);}
+  if(m.has(w))return;
+  let l=buckets.get(k); if(!l){l=[];buckets.set(k,l);}
+  m.set(w,l.length); l.push(w);
+}
+const idxGet=(sc,w)=>{const m=index.get(bkey(sc,w.length));return m?m.get(w):undefined;};
+const countWords=sc=>{let s=0;for(const [k,l] of buckets){if(Math.floor(k/10000)===sc)s+=l.length;}return s;};
+
+// ---------- КЛЮЧ (SHA-256, как в Java: первые 4 байта & 0x7FFFFFFF) ----------
+async function sha256Int(s){
+  if(crypto&&crypto.subtle){
+    const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(s));
+    const u=new Uint8Array(b);
+    return (((u[0]<<24)|(u[1]<<16)|(u[2]<<8)|u[3]) & 0x7FFFFFFF);
+  }
+  let h=0x811c9dc5;                       // запасной FNV-1a (несовместим с Java)
+  for(const b of new TextEncoder().encode(s)){h^=b;h=Math.imul(h,0x01000193)>>>0;}
+  return h&0x7FFFFFFF;
+}
+async function currentBase(){
+  if($("usePwd").checked){
+    const p=$("pwd").value;
+    if(!p.trim()){alert(t("needPwd"));return null;}
+    return sha256Int(p);
+  }
+  return sha256Int($("date").value||todayISO());
+}
+const todayISO=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
+
+// ---------- ШИФР (зеркало Java-версии) ----------
+const fmod=(a,b)=>((a%b)+b)%b;
+function encryptWord(tok,base,counter){
+  const lower=tok.toLowerCase(), sc=scriptOf(lower);
+  const idx=sc<0?undefined:idxGet(sc,lower);
+  if(idx!==undefined){
+    const list=buckets.get(bkey(sc,lower.length)), size=list.length;
+    const shift=fmod(base+counter,size);
+    return [list[fmod(idx+shift,size)],counter+1];
+  }
+  let out=""; if(sc===2)out+=MARKER;
+  for(const c of tok){
+    const up=c.toUpperCase(), ring=ringFor(up);
+    if(!ring){out+=c;counter++;continue;}
+    const shift=fmod(base+counter,ring.length);
+    out+=ring[fmod(ring.indexOf(up)+shift,ring.length)];counter++;
+  }
+  return [out,counter];
+}
+function decryptWord(tok,base,counter){
+  const marked=tok[0]===MARKER, body=marked?tok.slice(1):tok;
+  if(!body)return [tok,counter];
+  const sc=scriptOf(body);
+  if(!marked&&sc>=0){
+    const lower=body.toLowerCase();
+    const allUpper=body===body.toUpperCase()&&body!==lower;
+    if(!allUpper){
+      const m=idxGet(sc,lower);
+      if(m!==undefined){
+        const list=buckets.get(bkey(sc,body.length)), size=list.length;
+        const shift=fmod(base+counter,size);
+        return [list[fmod(m-shift,size)],counter+1];
+      }
+      if(sc!==2)return [tok,counter];
+    }
+  }
+  let out="";
+  for(const c of body){
+    const up=c.toUpperCase(), ring=ringFor(up);
+    if(!ring){out+=c;counter++;continue;}
+    const shift=fmod(base+counter,ring.length);
+    out+=ring[fmod(ring.indexOf(up)-shift,ring.length)];counter++;
+  }
+  return [out,counter];
+}
+function run(text,base,enc){
+  let out="",counter=0,i=0;const n=text.length;
+  while(i<n){
+    const ch=text[i];
+    if(ch>="0"&&ch<="9"){
+      let j=i;while(j<n&&text[j]>="0"&&text[j]<="9")j++;
+      for(let k=i;k<j;k++){const s=fmod(base+counter,DIG.length);out+=DIG[fmod(DIG.indexOf(text[k])+ (enc?s:-s),DIG.length)];counter++;}
+      i=j;
+    }else if(isLetter(ch)){
+      let j=i;while(j<n&&isLetter(text[j]))j++;
+      const r=enc?encryptWord(text.slice(i,j),base,counter):decryptWord(text.slice(i,j),base,counter);
+      out+=r[0];counter=r[1];i=j;
+    }else if(PUNCT.includes(ch)||JP_PUNCT.includes(ch)){
+      const ring=PUNCT.includes(ch)?PUNCT:JP_PUNCT;
+      const s=fmod(base+counter,ring.length);
+      out+=ring[fmod(ring.indexOf(ch)+(enc?s:-s),ring.length)];counter++;i++;
+    }else{out+=ch;i++;}
+  }
+  return out;
+}
+
+// ---------- ИНТЕРФЕЙС ----------
+const $=id=>document.getElementById(id);
+let lang="ru", mode="enc";
+const T={
+ ru:{title:"Прототип 3 — посимвольно-словесный шифр",enc:"Зашифровать",dec:"Расшифровать",
+     inn:"Сообщение или шифр…",out:"Результат…",copy:"Копировать",copied:"Скопировано",
+     date:"Дата ключа:",pwd:"ключ паролем",needPwd:"Введи пароль ключа",
+     load:"Загрузка словарей…",ready:(a,b,c)=>`Словари: RU ${a}, EN ${b}, JP ${c}`},
+ en:{title:"Prototype 3 — char/word substitution cipher",enc:"Encrypt",dec:"Decrypt",
+     inn:"Message or cipher…",out:"Result…",copy:"Copy",copied:"Copied",
+     date:"Key date:",pwd:"password key",needPwd:"Enter the key password",
+     load:"Loading dictionaries…",ready:(a,b,c)=>`Dictionaries: RU ${a}, EN ${b}, JP ${c}`},
+ jp:{title:"プロトタイプ3 — 文字/単語置換暗号",enc:"暗号化",dec:"復号",
+     inn:"メッセージまたは暗号文…",out:"結果…",copy:"コピー",copied:"コピーしました",
+     date:"鍵の日付:",pwd:"パスワード鍵",needPwd:"鍵のパスワードを入力",
+     load:"辞書を読み込み中…",ready:(a,b,c)=>`辞書: RU ${a}, EN ${b}, JP ${c}`}
+};
+const t=k=>T[lang][k];
+function setLang(l){
+  lang=l;
+  $("title").textContent=t("title");
+  $("mEnc").textContent=t("enc");$("mDec").textContent=t("dec");
+  $("in").placeholder=t("inn");$("out").placeholder=t("out");
+  $("copy").textContent=t("copy");$("lblDate").textContent=t("date");$("lblPwd").textContent=t("pwd");
+  refreshGo();
+}
+function refreshGo(){$("go").textContent=mode==="enc"?t("enc"):t("dec");}
+document.querySelectorAll("[data-l]").forEach(b=>b.onclick=()=>setLang(b.dataset.l));
+$("mEnc").onclick=()=>{mode="enc";$("mEnc").classList.add("on");$("mDec").classList.remove("on");refreshGo();};
+$("mDec").onclick=()=>{mode="dec";$("mDec").classList.add("on");$("mEnc").classList.remove("on");refreshGo();};
+$("go").onclick=async()=>{
+  const base=await currentBase();
+  if(base===null)return;
+  $("out").value=run($("in").value,base,mode==="enc");
+};
+$("copy").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("out").value);$("copy").textContent=t("copied");setTimeout(()=>{$("copy").textContent=t("copy");},1200);};
+
+// ---------- СТАРТ ----------
+(async()=>{
+  $("date").value=todayISO();
+  $("status").textContent=t("load");
+  for(const sc of [0,1,2]){
+    const f=DICT_FILES[sc];
+    let loaded=false;
+    try{
+      const r=await fetch(f);
+      if(r.ok){(await r.text()).split(/\r?\n/).forEach(l=>addWord(l,sc));loaded=true;}
+    }catch(e){}
+    if(!loaded)(FALLBACK[sc]||[]).forEach(w=>addWord(w,sc));
+  }
+  setLang("ru");
+  $("status").textContent=t("ready")(countWords(0),countWords(1),countWords(2));
+})();
+</script>
+</body>
+</html>
